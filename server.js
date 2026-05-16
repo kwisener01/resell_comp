@@ -25,6 +25,45 @@ function apiFetch(url) {
   });
 }
 
+function apiPost(url, body, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const opts = new URL(url);
+    const bodyStr = JSON.stringify(body);
+    const req = https.request({
+      hostname: opts.hostname,
+      path: opts.pathname,
+      method: 'POST',
+      agent: devAgent,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(bodyStr), ...headers }
+    }, res => {
+      let raw = '';
+      res.on('data', c => raw += c);
+      res.on('end', () => { try { resolve(JSON.parse(raw)); } catch (e) { reject(e); } });
+    });
+    req.on('error', reject);
+    req.write(bodyStr);
+    req.end();
+  });
+}
+
+async function estimateSoldWithAI(query, activeListings) {
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey || activeListings.length === 0) return null;
+  try {
+    const activePrices = activeListings.map(l => `$${l.price}`).join(', ');
+    const data = await apiPost('https://api.anthropic.com/v1/messages', {
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 400,
+      messages: [{ role: 'user', content: `Product: "${query}". Active eBay listings at: ${activePrices}. Generate 3 realistic recently-sold eBay prices for this product (sold items typically go for 85-95% of active list price). Return ONLY valid JSON, no markdown:\n{"soldListings":[{"title":"...","price":0.00,"type":"sold"},{"title":"...","price":0.00,"type":"sold"},{"title":"...","price":0.00,"type":"sold"}],"avgSoldPrice":0.00}` }]
+    }, { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' });
+    const text = data.content?.[0]?.text ?? '';
+    return JSON.parse(text.replace(/```json|```/g, '').trim());
+  } catch (e) {
+    console.error('AI estimate failed:', e.message);
+    return null;
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3001;
 const EBAY_APP_ID = process.env.EBAY_APP_ID;
@@ -68,15 +107,21 @@ app.get('/api/ebay', async (req, res) => {
     const avg = arr => arr.length ? arr.reduce((s, l) => s + l.price, 0) / arr.length : 0;
     const avgActive = avg(activeListings);
 
-    // If sold data unavailable (rate limited), estimate from active price
-    const soldListings = soldFromEbay.length > 0 ? soldFromEbay : activeListings.map(l => ({
-      ...l,
-      price: parseFloat((l.price * 0.87).toFixed(2)),
-      type: 'sold'
-    }));
-    const soldEstimated = soldFromEbay.length === 0;
+    let soldListings = soldFromEbay;
+    let soldEstimated = false;
+    let avgSoldPrice = avg(soldFromEbay);
 
-    const avgSoldPrice = soldFromEbay.length > 0 ? avg(soldFromEbay) : avgActive * 0.87;
+    if (soldFromEbay.length === 0) {
+      soldEstimated = true;
+      const aiEstimate = await estimateSoldWithAI(query, activeListings);
+      if (aiEstimate) {
+        soldListings = aiEstimate.soldListings;
+        avgSoldPrice = aiEstimate.avgSoldPrice;
+      } else {
+        soldListings = activeListings.map(l => ({ ...l, price: parseFloat((l.price * 0.87).toFixed(2)), type: 'sold' }));
+        avgSoldPrice = avgActive * 0.87;
+      }
+    }
 
     const category = soldRawItems[0]?.primaryCategory?.[0]?.categoryName?.[0]
       ?? activeItems[0]?.primaryCategory?.[0]?.categoryName?.[0]
