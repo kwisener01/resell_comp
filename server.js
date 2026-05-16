@@ -46,16 +46,11 @@ app.get('/api/ebay', async (req, res) => {
   const keywordsParam = `keywords=${encodeURIComponent(query)}&paginationInput.entriesPerPage=10`;
 
   try {
+    // Run both in parallel; sold listings may fail independently if rate limited
     const [soldData, activeData] = await Promise.all([
-      apiFetch(`${EBAY_BASE}?OPERATION-NAME=findCompletedItems&${appParam}&${COMMON_PARAMS}&${keywordsParam}&itemFilter(0).name=SoldItemsOnly&itemFilter(0).value=true`),
+      apiFetch(`${EBAY_BASE}?OPERATION-NAME=findCompletedItems&${appParam}&${COMMON_PARAMS}&${keywordsParam}&itemFilter(0).name=SoldItemsOnly&itemFilter(0).value=true`).catch(() => null),
       apiFetch(`${EBAY_BASE}?OPERATION-NAME=findItemsByKeywords&${appParam}&${COMMON_PARAMS}&${keywordsParam}`)
     ]);
-
-    console.log('eBay sold raw:', JSON.stringify(soldData).slice(0, 500));
-    console.log('eBay active raw:', JSON.stringify(activeData).slice(0, 500));
-
-    const soldItems  = soldData.findCompletedItemsResponse?.[0]?.searchResult?.[0]?.item ?? [];
-    const activeItems = activeData.findItemsByKeywordsResponse?.[0]?.searchResult?.[0]?.item ?? [];
 
     const parse = (items, type) =>
       items.map(item => ({
@@ -64,12 +59,26 @@ app.get('/api/ebay', async (req, res) => {
         type
       }));
 
-    const soldListings   = parse(soldItems, 'sold').slice(0, 5);
+    const activeItems = activeData.findItemsByKeywordsResponse?.[0]?.searchResult?.[0]?.item ?? [];
     const activeListings = parse(activeItems, 'active').slice(0, 5);
 
-    const avg = arr => arr.length ? arr.reduce((s, l) => s + l.price, 0) / arr.length : 0;
+    const soldRawItems = soldData?.findCompletedItemsResponse?.[0]?.searchResult?.[0]?.item ?? [];
+    const soldFromEbay = parse(soldRawItems, 'sold').slice(0, 5);
 
-    const category = soldItems[0]?.primaryCategory?.[0]?.categoryName?.[0]
+    const avg = arr => arr.length ? arr.reduce((s, l) => s + l.price, 0) / arr.length : 0;
+    const avgActive = avg(activeListings);
+
+    // If sold data unavailable (rate limited), estimate from active price
+    const soldListings = soldFromEbay.length > 0 ? soldFromEbay : activeListings.map(l => ({
+      ...l,
+      price: parseFloat((l.price * 0.87).toFixed(2)),
+      type: 'sold'
+    }));
+    const soldEstimated = soldFromEbay.length === 0;
+
+    const avgSoldPrice = soldFromEbay.length > 0 ? avg(soldFromEbay) : avgActive * 0.87;
+
+    const category = soldRawItems[0]?.primaryCategory?.[0]?.categoryName?.[0]
       ?? activeItems[0]?.primaryCategory?.[0]?.categoryName?.[0]
       ?? 'General';
 
@@ -77,12 +86,13 @@ app.get('/api/ebay', async (req, res) => {
       product: query,
       soldListings,
       activeListings,
-      avgSoldPrice:    avg(soldListings),
-      avgActivePrice:  avg(activeListings),
-      sellThroughRate: (soldListings.length + activeListings.length) > 0
-        ? soldListings.length / (soldListings.length + activeListings.length)
-        : 0,
-      category
+      avgSoldPrice,
+      avgActivePrice: avgActive,
+      sellThroughRate: soldFromEbay.length > 0
+        ? soldFromEbay.length / (soldFromEbay.length + activeListings.length)
+        : 0.55,
+      category,
+      soldEstimated
     });
   } catch (err) {
     console.error('eBay API error:', err.message, err.code, err.cause?.message);

@@ -463,7 +463,10 @@ export default function App() {
               </div>
             </div>
 
-            <div className="section-label">Recent Sold Listings</div>
+            <div className="section-label">
+              Recent Sold Listings
+              {result.soldEstimated && <span style={{color:'var(--yellow)',marginLeft:8,fontStyle:'normal'}}>· estimated (eBay limit)</span>}
+            </div>
             <div className="listings">
               {result.soldListings.map((l, i) => (
                 <div className="listing-row" key={i}>
